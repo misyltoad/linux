@@ -1,0 +1,285 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v6 1/4] dt-bindings: remoteproc: qcom: move glymur SoCCP
+ pas to standalone
+From: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Date: Thu, 09 Jul 2026 23:39:42 -0700
+Message-Id: <20260709-glymur-soccp-v6-1-16f70227547d@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+SHM bridge creation is required to enable memory protection for both
+remoteproc metadata and its memory region on Qualcomm SoCs like Glymur
+running non-Gunyah based Hypervisors, unlike Kaanapali.
+
+Having Glymur fall back to the Kaanapali binding is therefore incorrect
+and breaks subsystem restart on Glymur.
+
+Fix this by decoupling Glymur SoCCP PAS from Kaanapali and registering
+it as its own binding.
+
+Fixes: 8b54bacadc0c ("dt-bindings: remoteproc: qcom: Document pas for SoCCP on Kaanapali and Glymur platforms")
+Signed-off-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Reviewed-by: Krzysztof Kozlowski <krzysztof.kozlowski@oss.qualcomm.com>
+---
+ .../devicetree/bindings/remoteproc/qcom,kaanapali-soccp-pas.yaml        | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/remoteproc/qcom,kaanapali-soccp-pas.yaml b/Documentation/devicetree/bindings/remoteproc/qcom,kaanapali-soccp-pas.yaml
+index 8fd6913e414d..e6c78d621d17 100644
+--- a/Documentation/devicetree/bindings/remoteproc/qcom,kaanapali-soccp-pas.yaml
++++ b/Documentation/devicetree/bindings/remoteproc/qcom,kaanapali-soccp-pas.yaml
+@@ -20,11 +20,11 @@ properties:
+     oneOf:
+       - items:
+           - enum:
+-              - qcom,glymur-soccp-pas
+               - qcom,hawi-soccp-pas
+               - qcom,maili-soccp-pas
+           - const: qcom,kaanapali-soccp-pas
+       - enum:
++          - qcom,glymur-soccp-pas
+           - qcom,kaanapali-soccp-pas
+ 
+   reg:
+
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v6 2/4] remoteproc: qcom: pas: add needs_tzmem flag to
+ trigger shmbridge creation
+From: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Date: Thu, 09 Jul 2026 23:39:43 -0700
+Message-Id: <20260709-glymur-soccp-v6-2-16f70227547d@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+SHM bridge creation is required to enable memory protection for both
+remoteproc metadata and its memory region on Qualcomm SoCs running
+non-Gunyah based Hypervisors. We currently rely on the iommu property
+being present in the remoteproc nodes to detect this.
+
+However, this doesn't cover for cases where the remoteproc does a late
+attach, like SoCCP, and for remoteprocs like OOBM SS (Out of Band
+Management Sub-system) that doesn't have an iommu in front of it. In the
+former case, any attempt to create new mappings would fail with EEXIST
+as they are already setup by the bootloader when the SoCCP is brought
+out of reset, and unmapping them to create fresh mappings leads to faults
+since SoCCP could have active transactions on the bus. In the latter case,
+absence of iommu will be caught by the has_iommu flag, and SHM bridge
+creation will be skipped.
+
+Fix this by introducing a needs_tzmem flag which would cover for the
+above edge cases by serving as an alternate trigger to the PAS helpers
+to ensure that SHM bridge is established.
+
+Reviewed-by: Mukesh Ojha <mukesh.ojha@oss.qualcomm.com>
+Signed-off-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+---
+ drivers/remoteproc/qcom_q6v5_pas.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/remoteproc/qcom_q6v5_pas.c b/drivers/remoteproc/qcom_q6v5_pas.c
+index 60a4337d9e51..cd7273fbcf98 100644
+--- a/drivers/remoteproc/qcom_q6v5_pas.c
++++ b/drivers/remoteproc/qcom_q6v5_pas.c
+@@ -61,6 +61,7 @@ struct qcom_pas_data {
+ 	bool region_assign_shared;
+ 	int region_assign_vmid;
+ 	bool early_boot;
++	bool needs_tzmem;
+ };
+ 
+ struct qcom_pas {
+@@ -914,8 +915,8 @@ static int qcom_pas_probe(struct platform_device *pdev)
+ 		goto remove_ssr_sysmon;
+ 	}
+ 
+-	pas->pas_ctx->use_tzmem = rproc->has_iommu;
+-	pas->dtb_pas_ctx->use_tzmem = rproc->has_iommu;
++	pas->pas_ctx->use_tzmem = desc->needs_tzmem || rproc->has_iommu;
++	pas->dtb_pas_ctx->use_tzmem = desc->needs_tzmem || rproc->has_iommu;
+ 
+ 	if (desc->early_boot)
+ 		pas->rproc->state = RPROC_DETACHED;
+@@ -1657,8 +1658,27 @@ static const struct qcom_pas_data kaanapali_soccp_resource = {
+ 	.early_boot = true,
+ };
+ 
++static const struct qcom_pas_data glymur_soccp_resource = {
++	.crash_reason_smem = 656,
++	.firmware_name = "soccp.mbn",
++	.dtb_firmware_name = "soccp_dtb.mbn",
++	.pas_id = 51,
++	.dtb_pas_id = 0x41,
++	.proxy_pd_names = (char*[]){
++		"cx",
++		"mx",
++		NULL
++	},
++	.ssr_name = "soccp",
++	.sysmon_name = "soccp",
++	.auto_boot = true,
++	.early_boot = true,
++	.needs_tzmem = true,
++};
++
+ static const struct of_device_id qcom_pas_of_match[] = {
+ 	{ .compatible = "qcom,eliza-adsp-pas", .data = &sm8550_adsp_resource },
++	{ .compatible = "qcom,glymur-soccp-pas", .data = &glymur_soccp_resource },
+ 	{ .compatible = "qcom,kaanapali-soccp-pas", .data = &kaanapali_soccp_resource },
+ 	{ .compatible = "qcom,milos-adsp-pas", .data = &sm8550_adsp_resource },
+ 	{ .compatible = "qcom,milos-cdsp-pas", .data = &milos_cdsp_resource },
+
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v6 3/4] arm64: dts: qcom: fix SoCCP memory mappings for
+ Glymur
+From: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Date: Thu, 09 Jul 2026 23:39:44 -0700
+Message-Id: <20260709-glymur-soccp-v6-3-16f70227547d@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The currently listed SoCCP and SoCCP DTB reserved memory regions
+don't align with the memory requested by the SoCCP Firmware. Fix
+this by updating the SoCCP/SoCCP DTB memory regions to reflect the
+memory region requirements of the SoCCP firmware, as described in
+the Glymur v21 memory map release.
+
+Fixes: 41b6e8db400c ("arm64: dts: qcom: Introduce Glymur base dtsi")
+Signed-off-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+---
+ arch/arm64/boot/dts/qcom/glymur.dtsi | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/glymur.dtsi b/arch/arm64/boot/dts/qcom/glymur.dtsi
+index 20b49af7298e..9ec7c256b80a 100644
+--- a/arch/arm64/boot/dts/qcom/glymur.dtsi
++++ b/arch/arm64/boot/dts/qcom/glymur.dtsi
+@@ -602,13 +602,13 @@ spss_region_mem: spss@88a00000 {
+ 			no-map;
+ 		};
+ 
+-		soccpdtb_mem: soccpdtb@892e0000 {
+-			reg = <0x0 0x892e0000 0x0 0x20000>;
++		soccp_mem: soccp@88e00000 {
++			reg = <0x0 0x88e00000 0x0 0x400000>;
+ 			no-map;
+ 		};
+ 
+-		soccp_mem: soccp@89300000 {
+-			reg = <0x0 0x89300000 0x0 0x400000>;
++		soccpdtb_mem: soccpdtb@89200000 {
++			reg = <0x0 0x89200000 0x0 0x20000>;
+ 			no-map;
+ 		};
+ 
+
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v6 4/4] arm64: dts: qcom: add SoCCP DT node for Glymur
+From: Sibi Sankar <sibi.sankar@oss.qualcomm.com>
+Date: Thu, 09 Jul 2026 23:39:45 -0700
+Message-Id: <20260709-glymur-soccp-v6-4-16f70227547d@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The SoC Control Processor (SoCCP) is a small RISC-V MCU that controls
+USB Type-C, battery charging, and various other functions on Qualcomm SoCs.
+
+Add the nodes required to enable SoCCP on Glymur/Mahua SoCs.
+
+Signed-off-by: Sibi Sankar <sibi.sankar@oss.qualcomm.com>
+Co-developed-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Signed-off-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+---
+ arch/arm64/boot/dts/qcom/glymur-crd.dtsi |  5 ++++
+ arch/arm64/boot/dts/qcom/glymur.dtsi     | 44 ++++++++++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/glymur-crd.dtsi b/arch/arm64/boot/dts/qcom/glymur-crd.dtsi
+index e784b538f42e..d728478f0a11 100644
+--- a/arch/arm64/boot/dts/qcom/glymur-crd.dtsi
++++ b/arch/arm64/boot/dts/qcom/glymur-crd.dtsi
+@@ -585,6 +585,11 @@ &remoteproc_cdsp {
+ 	status = "okay";
+ };
+ 
++&remoteproc_soccp {
++	firmware-name = "qcom/glymur/soccp.mbn",
++			"qcom/glymur/soccp_dtb.mbn";
++};
++
+ &tlmm {
+ 	gpio-reserved-ranges = <4 4>, /* EC TZ Secure I3C */
+ 			       <10 2>, /* OOB UART */
+diff --git a/arch/arm64/boot/dts/qcom/glymur.dtsi b/arch/arm64/boot/dts/qcom/glymur.dtsi
+index 9ec7c256b80a..f4569d49dedc 100644
+--- a/arch/arm64/boot/dts/qcom/glymur.dtsi
++++ b/arch/arm64/boot/dts/qcom/glymur.dtsi
+@@ -2297,6 +2297,50 @@ &config_noc SLAVE_QUP_0 QCOM_ICC_TAG_ALWAYS>,
+ 			};
+ 		};
+ 
++		remoteproc_soccp: remoteproc@d00000 {
++			compatible = "qcom,glymur-soccp-pas";
++			reg = <0x0 0x00d00000 0x0 0x200000>;
++
++			interrupts-extended = <&intc GIC_SPI 167 IRQ_TYPE_EDGE_RISING>,
++					      <&soccp_smp2p_in 0 IRQ_TYPE_EDGE_RISING>,
++					      <&soccp_smp2p_in 1 IRQ_TYPE_EDGE_RISING>,
++					      <&soccp_smp2p_in 2 IRQ_TYPE_EDGE_RISING>,
++					      <&soccp_smp2p_in 3 IRQ_TYPE_EDGE_RISING>,
++					      <&soccp_smp2p_in 9 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "wdog",
++					  "fatal",
++					  "ready",
++					  "handover",
++					  "stop-ack",
++					  "pong";
++
++			clocks = <&rpmhcc RPMH_CXO_CLK>;
++			clock-names = "xo";
++
++			power-domains = <&rpmhpd RPMHPD_CX>,
++					<&rpmhpd RPMHPD_MX>;
++			power-domain-names = "cx",
++					     "mx";
++
++			memory-region = <&soccp_mem>,
++					<&soccpdtb_mem>;
++
++			qcom,smem-states = <&soccp_smp2p_out 0>,
++					   <&soccp_smp2p_out 8>;
++			qcom,smem-state-names = "stop",
++						"ping";
++
++			glink-edge {
++				interrupts-extended = <&ipcc IPCC_MPROC_SOCCP
++							     IPCC_MPROC_SIGNAL_GLINK_QMP
++							     IRQ_TYPE_EDGE_RISING>;
++				mboxes = <&ipcc IPCC_MPROC_SOCCP
++						IPCC_MPROC_SIGNAL_GLINK_QMP>;
++				qcom,remote-pid = <19>;
++				label = "soccp";
++			};
++		};
++
+ 		usb_hs_phy: phy@fa0000 {
+ 			compatible = "qcom,glymur-m31-eusb2-phy",
+ 				     "qcom,sm8750-m31-eusb2-phy";
+
+-- 
+2.43.0
+

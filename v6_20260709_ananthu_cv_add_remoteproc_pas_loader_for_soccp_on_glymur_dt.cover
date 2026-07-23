@@ -1,0 +1,105 @@
+Subject: [PATCH v6 0/4] Add remoteproc PAS loader for SoCCP on Glymur DT
+From: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+Date: Thu, 09 Jul 2026 23:39:41 -0700
+Message-Id: <20260709-glymur-soccp-v6-0-16f70227547d@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The SoC Control Processor (SoCCP) is a small RISC-V MCU that controls
+USB Type-C, battery charging and various other functions on Qualcomm SoCs.
+This series add the nodes required to enable SoCCP on Glymur/Mahua SoCs.
+
+It also introduces the needs_tzmem flag which would cover for certain edge
+cases by serving as an alternate trigger to the PAS helpers to ensure that
+SHM bridge is established on SoCs running non-Gunyah based Hypervisors. This
+change is required for SSR to work on SoCCP on Glymur.
+
+Since Kaanapali SoCCP does not require or enable needs_tzmem, SoCCP falling
+back to qcom,kaanapali-soccp-pas binding will break SSR on Glymur. Hence
+qcom,glymur-soccp-pas is decoupled from the former and added standalone
+(simply dropping the fallback would result in a dtbs_check failure).
+
+We added SoCCP SSR verification support in diag upstream. SoCCP SSR on
+Glymur can be triggered using the following commands using diag:
+  error fatal: send_data 75 37 03 152 00
+  wdog bite: send_data 75 37 03 152 01
+  Software exception (Null pointer): send_data 75 37 03 152 02
+  software exception (div by 0): send_data 75 37 03 152 03
+
+/ # send_data 75 37 03 152 03
+75 37 3 152
+/ # qcom_q6v5_pas d00000.remoteproc: fatal error received: EX:idle:0x0xa90cc050:PC=0xa8eb5d8c:LR=0xa8fe5b3a:CAUSE=0xb:REASON=0x4
+ remoteproc remoteproc0: crash detected in soccp: type fatal error
+ qcom_q6v5_pas d00000.remoteproc: Handover signaled, but it already happened
+ remoteproc remoteproc0: handling crash #4 in soccp
+ remoteproc remoteproc0: recovering soccp
+ ucsi_glink.pmic_glink_ucsi pmic_glink.ucsi.0: failed to send UCSI write request: -104
+ remoteproc remoteproc0: stopped remote processor soccp
+ usb 3-1: USB disconnect, device number 3
+ usb 5-1: USB disconnect, device number 2
+ r8152-cfgselector 5-1.3: USB disconnect, device number 3
+ qcom_q6v5_pas d00000.remoteproc: Handover signaled, but it already happened
+ debugfs: 'pmic_glink.ucsi.0' already exists in 'ucsi'
+ remoteproc remoteproc0: remote processor soccp is now up
+
+Signed-off-by: Ananthu C V <ananthu.cv@oss.qualcomm.com>
+---
+Changes in v6:
+  - decoupled qcom,glymur-soccp-pas from qcom,kaanapali-soccp-pas and added it standalone
+  - dropped qcom,kaanapali-soccp-pas fallback
+  - dropped status = "okay" in glymur-crd.dtsi for remoteproc_soccp, as it is never disabled
+  - picked up "Reviewed-by"
+  - Link to v5: https://patch.msgid.link/20260707-glymur-soccp-v5-0-053993f0c6fe@oss.qualcomm.com
+
+Changes in v5:
+  - sorted soccp memory regions in ascending order
+  - readded qcom,kaanapali-soccp-pas compatible as fallback
+  - updated commit messages
+  - Link to v4: https://patch.msgid.link/20260703-glymur-soccp-v4-0-b706c4c9b3e2@oss.qualcomm.com
+
+Changes in v4:
+  - dropped soccp from remoteproc node name
+  - dropped status=disabled
+  - added a new needs_tzmem flag in qcom_q6v5_pas platform driver, and added glymur_soccp_resource
+    which uses the flag
+  - dropped qcom,kaanapali-soccp-pas compatible, due to the kaanapali_soccp_resource not having the
+    needs_tzmem flag enabled
+  - fixed memory region mappings for glymur soccp
+  - Link to v3: https://lore.kernel.org/lkml/20260403-glymur-soccp-v3-1-f0e8d57f11ba@oss.qualcomm.com
+
+Changes in v3:
+  - dropped smp2p nodes which are already merged, and adsp and cdsp nodes
+  - updated interrupts-extended (dropped  <&soccp_smp2p_in 10 IRQ_TYPE_EDGE_RISING>), interrupt-names
+    (dropped wake-ack), smem-states (dropped <&soccp_smp2p_out 10>, <&soccp_smp2p_out 9>), and
+    smem-state-names (dropped wakeup, sleep)
+  - fixed IPCC names, GLYMUR_MPROC_SOCCP -> IPCC_MPROC_SOCCP
+  - Link to v2: https://lore.kernel.org/lkml/20250925-v3_glymur_introduction-v2-24-8e1533a58d2d@oss.qualcomm.com/
+
+Changes in v2:
+  - None related to soccp
+  - Link to v1: https://lore.kernel.org/r/20250925-v3_glymur_introduction-v1-0-5413a85117c6@oss.qualcomm.com
+
+---
+Ananthu C V (3):
+      dt-bindings: remoteproc: qcom: move glymur SoCCP pas to standalone
+      remoteproc: qcom: pas: add needs_tzmem flag to trigger shmbridge creation
+      arm64: dts: qcom: fix SoCCP memory mappings for Glymur
+
+Sibi Sankar (1):
+      arm64: dts: qcom: add SoCCP DT node for Glymur
+
+ .../remoteproc/qcom,kaanapali-soccp-pas.yaml       |  2 +-
+ arch/arm64/boot/dts/qcom/glymur-crd.dtsi           |  5 +++
+ arch/arm64/boot/dts/qcom/glymur.dtsi               | 52 ++++++++++++++++++++--
+ drivers/remoteproc/qcom_q6v5_pas.c                 | 24 +++++++++-
+ 4 files changed, 76 insertions(+), 7 deletions(-)
+---
+base-commit: 6eb8711ece2ce27e52e327a5b7a628ed39b97f45
+change-id: 20260702-glymur-soccp-8f50d947f601
+
+Best regards,
+--  
+Ananthu C V <ananthu.cv@oss.qualcomm.com>
+
+
